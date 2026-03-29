@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import structlog
 from sqlalchemy import text
 
-from nexus.database import async_session_maker
+from nexus.database import async_session_factory
 from nexus.agents.monitoring import MonitoringAgent
 from nexus.memory.audit_logger import AuditLogger
 
@@ -37,7 +37,7 @@ async def _check_all_active_workflows():
     warnings = 0
     breaches = 0
 
-    async with async_session_maker() as session:
+    async with async_session_factory() as session:
         audit = AuditLogger(session)
         monitor = MonitoringAgent(session, audit)
 
