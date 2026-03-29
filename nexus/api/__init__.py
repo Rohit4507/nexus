@@ -1,4 +1,4 @@
-"""NEXUS FastAPI application — minimal bootstrap for Phase 1."""
+"""NEXUS FastAPI application — Phase 2: Agent Core integrated."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     settings = get_settings()
     print(f"🚀 NEXUS v{__version__} starting in {settings.env.value} mode")
+    print(f"   Ollama: {settings.ollama_url}")
+    print(f"   Database: {settings.db_host}:{settings.db_port}/{settings.db_name}")
     yield
     print("🛑 NEXUS shutting down")
 
@@ -28,7 +30,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # Health check
+    # ── Health check ─────────────────────────────────────────
     @app.get("/health")
     async def health():
         return {
@@ -36,6 +38,10 @@ def create_app() -> FastAPI:
             "version": __version__,
             "environment": settings.env.value,
         }
+
+    # ── Register route modules ───────────────────────────────
+    from nexus.api.routes import router as workflows_router
+    app.include_router(workflows_router)
 
     return app
 
