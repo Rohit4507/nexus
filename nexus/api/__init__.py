@@ -1,4 +1,4 @@
-"""NEXUS FastAPI application — Phase 2: Agent Core integrated."""
+"""NEXUS FastAPI application — Phase 3: Tool Integration wired."""
 
 from __future__ import annotations
 
@@ -17,7 +17,16 @@ async def lifespan(app: FastAPI):
     print(f"🚀 NEXUS v{__version__} starting in {settings.env.value} mode")
     print(f"   Ollama: {settings.ollama_url}")
     print(f"   Database: {settings.db_host}:{settings.db_port}/{settings.db_name}")
+
+    # Initialize tool registry
+    from nexus.tools.registry import ToolRegistry
+    app.state.tool_registry = ToolRegistry.from_settings()
+    print(f"   Tools: {app.state.tool_registry.tool_names}")
+
     yield
+
+    # Shutdown: close all tool HTTP clients
+    await app.state.tool_registry.close_all()
     print("🛑 NEXUS shutting down")
 
 
@@ -37,6 +46,17 @@ def create_app() -> FastAPI:
             "status": "healthy",
             "version": __version__,
             "environment": settings.env.value,
+        }
+
+    @app.get("/health/tools")
+    async def tools_health(request):
+        """Health check for all registered integration tools."""
+        registry = request.app.state.tool_registry
+        results = await registry.health_check_all()
+        all_healthy = all(r["healthy"] for r in results.values())
+        return {
+            "status": "healthy" if all_healthy else "degraded",
+            "tools": results,
         }
 
     # ── Register route modules ───────────────────────────────
