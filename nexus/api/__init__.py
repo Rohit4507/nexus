@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 
 from fastapi import FastAPI
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from nexus import __version__
 from nexus.config import get_settings
@@ -23,9 +25,17 @@ async def lifespan(app: FastAPI):
     app.state.tool_registry = ToolRegistry.from_settings()
     print(f"   Tools: {app.state.tool_registry.tool_names}")
 
+    # Start SLA Monitor background polling
+    from nexus.agents.sla_monitor import poll_slas
+    app.state.sla_task = asyncio.create_task(poll_slas(interval_seconds=60))
+    print("   SLA Monitor started (60s loop)")
+
     yield
 
-    # Shutdown: close all tool HTTP clients
+    # Shutdown
+    if app.state.sla_task:
+        app.state.sla_task.cancel()
+        
     await app.state.tool_registry.close_all()
     print("🛑 NEXUS shutting down")
 
@@ -62,6 +72,9 @@ def create_app() -> FastAPI:
     # ── Register route modules ───────────────────────────────
     from nexus.api.routes import router as workflows_router
     app.include_router(workflows_router)
+
+    # ── Prometheus Metrics ───────────────────────────────────
+    Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
     return app
 

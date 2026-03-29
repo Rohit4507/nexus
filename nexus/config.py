@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     docusign_api_key: str = ""
     docusign_staging_key: str = ""
 
+    # ── Contract workflow ─────────────────────────────────────
+    legal_notification_email: str = "legal@company.com"
+    contract_docusign_poll_interval_seconds: float = 15.0
+    contract_docusign_poll_max_attempts: int = 40
+
     # ── n8n ──────────────────────────────────────────────────
     n8n_user: str = "admin"
     n8n_password: str = ""

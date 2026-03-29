@@ -16,6 +16,14 @@ import structlog
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 
+from nexus.llm.router import LLMRouter
+from nexus.tools.registry import ToolRegistry
+from nexus.memory.audit_logger import AuditLogger
+
+from nexus.agents.execution.procurement import ProcurementAgent
+from nexus.agents.execution.onboarding import OnboardingAgent
+from nexus.agents.execution.contracts import ContractAgent
+
 logger = structlog.get_logger()
 
 
@@ -121,11 +129,7 @@ async def route_node(state: dict) -> dict:
 
 
 async def execute_node(state: dict) -> dict:
-    """Dispatch to the appropriate execution agent.
-
-    Actual execution logic lives in nexus/agents/execution/*.py
-    This node is a dispatcher that calls the right executor.
-    """
+    """Dispatch to the appropriate execution agent."""
     logger.info(
         "execute_start",
         workflow_id=state["workflow_id"],
@@ -135,17 +139,59 @@ async def execute_node(state: dict) -> dict:
     state["current_phase"] = "executing"
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    # Execution agents are plugged in at runtime
-    # Stub: mark as completed for now
-    state["agent_outputs"].append({
-        "agent": f"{state['workflow_type']}_executor",
-        "phase": "execute",
-        "timestamp": state["updated_at"],
-        "result": "execution_dispatched",
-    })
+    # Instantiate runtime dependencies
+    tools = ToolRegistry.from_settings()
+    llm = LLMRouter()
+    audit = AuditLogger()
 
-    state["current_phase"] = "executed"
-    state["status"] = "completed"
+    wf_type = state["workflow_type"]
+    result = {}
+
+    try:
+        if wf_type == "procurement":
+            agent = ProcurementAgent(tools, llm, audit)
+            result = await agent.execute(state)
+        elif wf_type == "onboarding":
+            agent = OnboardingAgent(tools, llm, audit)
+            result = await agent.execute(state)
+        elif wf_type == "contract":
+            agent = ContractAgent(tools, llm, audit)
+            result = await agent.execute(state)
+        elif wf_type == "meeting":
+            result = {"status": "mocked", "msg": "meeting agent stub"}
+        else:
+            raise ValueError(f"No execution logic for {wf_type}")
+
+        state["agent_outputs"].append({
+            "agent": f"{wf_type}_executor",
+            "phase": "execute",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "result": result,
+        })
+        
+        # Shutdown runtime clients properly
+        await llm.close()
+        await tools.close_all()
+
+        if result.get("status") == "awaiting_human":
+            state["status"] = "in_progress"
+            state["human_override"] = True
+        else:
+            state["status"] = "completed"
+        
+        state["current_phase"] = "executed"
+
+    except Exception as e:
+        logger.error("execution_failed", error=str(e), workflow_type=wf_type)
+        await llm.close()
+        await tools.close_all()
+        state["error_log"].append({
+            "phase": "execute",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        state["status"] = "failed"
+
     return state
 
 
