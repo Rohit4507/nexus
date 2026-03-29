@@ -77,7 +77,9 @@ def prepare_static_filter(raw: dict | None) -> dict[str, str] | None:
         v = raw[key]
         if v in (None, "*"):
             out[key] = "*"
-        elif key in ("doc_type", "contract_type", "risk_tag"):
+        elif key == "contract_type":
+            out[key] = canonical_contract_type(v)
+        elif key in ("doc_type", "risk_tag"):
             out[key] = str(v).strip().lower()
         else:
             out[key] = str(v).strip()
