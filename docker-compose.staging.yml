@@ -1,0 +1,30 @@
+# Usage: docker compose -f docker-compose.yml -f docker-compose.staging.yml up
+services:
+  api:
+    environment:
+      ENV: staging
+      SAP_BASE_URL: https://sandbox.api.sap.com
+      SALESFORCE_URL: https://test.salesforce.com
+      DOCUSIGN_API_KEY: ${DOCUSIGN_STAGING_KEY:-}
+      PAYMENT_ENABLED: "false"
+
+  n8n:
+    environment:
+      NEXUS_API_URL: http://api:8000
+      N8N_BASIC_AUTH_USER: staging_admin
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_STAGING_PASSWORD:-staging}
+
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      OLLAMA_MODELS: "llama3:8b-q4_K_M"
+
+  prometheus:
+    volumes:
+      - ./prometheus.staging.yml:/etc/prometheus/prometheus.yml
