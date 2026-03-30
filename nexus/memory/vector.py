@@ -152,9 +152,28 @@ class FAISSStore(VectorStore):
         if os.path.exists(index_path):
             self.index = faiss.read_index(index_path)
             logger.info("faiss_index_loaded", path=index_path, count=self.index.ntotal)
+            
+            # Load metadata from companion pickle file
+            import pickle
+            meta_path = index_path.replace(".index", "_meta.pkl")
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "rb") as f:
+                        self.metadata_store = pickle.load(f)
+                    logger.info("faiss_metadata_loaded", path=meta_path, count=len(self.metadata_store))
+                except Exception as e:
+                    logger.warning("faiss_metadata_load_failed", error=str(e), path=meta_path)
+                    self.metadata_store = []
+            else:
+                self.metadata_store = []
+                logger.warning(
+                    f"No metadata file found at {meta_path}. "
+                    "Search will return empty metadata."
+                )
         else:
             # IndexFlatL2 is exact search (L2 distance)
             self.index = faiss.IndexFlatL2(embedding_dims)
+            self.metadata_store = []
             logger.info("faiss_index_created", dims=embedding_dims)
 
     def _load_metadata_store(self) -> dict[int, dict]:

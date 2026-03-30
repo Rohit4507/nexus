@@ -1,0 +1,13 @@
+NEXUS v0.1.0 starting in development mode
+   Ollama: http://localhost:11434
+   Database: localhost:5432/nexus
+2026-03-31 00:53:19 [info     ] tool_registered                env=development mock_mode=True name=sap_erp
+2026-03-31 00:53:19 [info     ] tool_registered                env=development mock_mode=True name=salesforce_crm
+2026-03-31 00:53:19 [info     ] tool_registered                env=development mock_mode=True name=slack_messenger
+2026-03-31 00:53:19 [info     ] tool_registered                env=development mock_mode=True name=email_connector
+2026-03-31 00:53:20 [info     ] tool_registered                env=development mock_mode=True name=docusign
+2026-03-31 00:53:20 [info     ] tool_registry_initialized      env=development tools=['sap_erp', 'salesforce_crm', 'slack_messenger', 'email_connector', 'docusign']
+   Tools: ['sap_erp', 'salesforce_crm', 'slack_messenger', 'email_connector', 'docusign']
+   SLA Monitor started (60s loop)
+2026-03-31 00:53:20 [info     ] sla_monitor_started            interval=60
+INFO:     127.0.0.1:64061 - "GET /health HTTP/1.1" 200 OK

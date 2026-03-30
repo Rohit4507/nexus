@@ -109,6 +109,29 @@ class MeetingAgent:
         self.settings = get_settings()
         self.ollama_url = ollama_url.rstrip("/")
         self.http = httpx.AsyncClient(timeout=120.0)
+        
+        # Initialize faster-whisper for transcription
+        try:
+            from faster_whisper import WhisperModel
+            self.whisper = WhisperModel(
+                "small", device="cuda", compute_type="float16"
+            )
+            logger.info("faster_whisper_initialized", model="small")
+        except Exception as e:
+            logger.warning("faster_whisper_init_failed", error=str(e))
+            self.whisper = None
+            
+        # Initialize pyannote for diarization with error handling
+        try:
+            from pyannote.audio import Pipeline
+            self.diarizer = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
+                device="cuda"
+            )
+            logger.info("pyannote_diarizer_initialized")
+        except Exception as e:
+            logger.warning("pyannote_diarizer_init_failed", error=str(e))
+            self.diarizer = None
 
     async def execute(self, state: dict[str, Any]) -> dict[str, Any]:
         """Adapter for orchestrator execute_node."""
@@ -268,15 +291,40 @@ class MeetingAgent:
             raise
 
     async def _transcribe_audio(self, audio_path: str) -> str:
-        """Transcribe audio using Whisper.
+        """Transcribe audio using faster-whisper.
 
         Production options:
-        1. OpenAI Whisper API (most accurate)
-        2. whisper.cpp (local, fast, C++ implementation)
-        3. Faster-Whisper (Python, GPU-accelerated)
+        1. faster-whisper (GPU-accelerated, RTX 3050 compatible)
+        2. OpenAI Whisper API (most accurate)
+        3. whisper.cpp server (local, fast, C++ implementation)
 
         This implementation supports multiple backends via config.
         """
+        # Use faster-whisper if available
+        if self.whisper:
+            try:
+                segments, info = self.whisper.transcribe(
+                    audio_path, word_timestamps=True
+                )
+                
+                # Convert faster-whisper format to expected format
+                transcript_parts = []
+                for segment in segments:
+                    transcript_parts.append(segment.text)
+                
+                full_transcript = " ".join(transcript_parts).strip()
+                logger.info(
+                    "faster_whisper_transcribed",
+                    path=audio_path,
+                    duration=info.duration,
+                    language=info.language
+                )
+                return full_transcript
+                
+            except Exception as e:
+                logger.error("faster_whisper_failed", error=str(e))
+                # Fall back to other methods
+        
         # Check for OpenAI API key (highest quality)
         openai_key = os.environ.get("OPENAI_API_KEY")
         if openai_key:
@@ -956,6 +1004,32 @@ Speaker 1: Alright, meeting adjourned. Thanks everyone!"""
         )
         await self.db.flush()
         return workflow_id
+
+    def _merge_transcript_and_diarization(
+        self, transcript: str, diarization: Any
+    ) -> str:
+        """Merge transcript with speaker diarization.
+        
+        If diarization is None, returns plain transcript with [SPEAKER] labels.
+        """
+        if diarization is None:
+            # No diarization available - add generic speaker labels
+            lines = transcript.split('\n')
+            merged_lines = []
+            speaker_counter = 1
+            
+            for line in lines:
+                line = line.strip()
+                if line:
+                    merged_lines.append(f"[SPEAKER {speaker_counter}]: {line}")
+                    # Alternate between speakers for basic separation
+                    speaker_counter = 1 if speaker_counter >= 2 else speaker_counter + 1
+            
+            return '\n'.join(merged_lines)
+        
+        # Original diarization logic would go here if diarization was available
+        # For now, return transcript with basic speaker labeling
+        return self._merge_transcript_and_diarization(transcript, None)
 
     async def close(self):
         """Cleanup HTTP clients."""

@@ -113,11 +113,14 @@ class UsageTracker:
             tokens_in=record.input_tokens,
             tokens_out=record.output_tokens,
         )
-        if self.db:
-            await self.db.execute(
-                "INSERT INTO audit_logs (agent_name, action, llm_tier, "
-                "duration_ms, input_data, output_data, status, created_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+
+    async def flush(self) -> None:
+        """Flush accumulated records to database in batch."""
+        if not self.db or not self.records:
+            return
+        
+        values = [
+            (
                 "llm_router", record.task_type, record.tier,
                 record.latency_ms,
                 json.dumps({"input_tokens": record.input_tokens}),
@@ -125,6 +128,18 @@ class UsageTracker:
                             "cost_usd": record.cost_usd}),
                 "success", record.timestamp,
             )
+            for record in self.records
+        ]
+        
+        await self.db.executemany(
+            "INSERT INTO audit_logs (agent_name, action, llm_tier, "
+            "duration_ms, input_data, output_data, status, created_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            values
+        )
+        
+        self.records.clear()
+        logger.info("llm_usage_flushed", count=len(values))
 
 
 class LLMRouter:
@@ -254,14 +269,23 @@ class LLMRouter:
         )
         resp.raise_for_status()
         data = resp.json()
+        content = data["response"]
+        
+        # Attempt to extract confidence from JSON response
+        confidence = None
+        try:
+            parsed = json.loads(content)
+            confidence = parsed.get("confidence")
+        except (json.JSONDecodeError, AttributeError):
+            pass  # Keep confidence as None if not JSON or no key
 
         return {
-            "content": data["response"],
+            "content": content,
             "tokens": {
                 "input": data.get("prompt_eval_count", 0),
                 "output": data.get("eval_count", 0),
             },
-            "confidence": None,
+            "confidence": confidence,
         }
 
     def _calc_cost(self, tier: str, tokens: dict) -> float:

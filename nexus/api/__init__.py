@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 import asyncio
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from nexus import __version__
@@ -16,7 +16,7 @@ from nexus.config import get_settings
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     settings = get_settings()
-    print(f"🚀 NEXUS v{__version__} starting in {settings.env.value} mode")
+    print(f"NEXUS v{__version__} starting in {settings.env.value} mode")
     print(f"   Ollama: {settings.ollama_url}")
     print(f"   Database: {settings.db_host}:{settings.db_port}/{settings.db_name}")
 
@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
         app.state.sla_task.cancel()
         
     await app.state.tool_registry.close_all()
-    print("🛑 NEXUS shutting down")
+    print("NEXUS shutting down")
 
 
 def create_app() -> FastAPI:
@@ -59,7 +59,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/health/tools")
-    async def tools_health(request):
+    async def tools_health(request: Request):
         """Health check for all registered integration tools."""
         registry = request.app.state.tool_registry
         results = await registry.health_check_all()

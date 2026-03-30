@@ -17,6 +17,37 @@ import structlog
 logger = structlog.get_logger()
 
 
+# ── Custom Exception Classes ───────────────────────────────────────────────────
+
+class NexusError(Exception):
+    """Base exception for NEXUS system with classification attributes."""
+    is_transient: bool = False
+    is_data_error: bool = False
+    is_auth_error: bool = False
+    field: str = ""
+    service: str = ""
+
+class TransientError(NexusError):
+    """Transient network or temporary failure."""
+    is_transient = True
+
+class DataError(NexusError):
+    """Data validation or missing field error."""
+    is_data_error = True
+
+class AuthError(NexusError):
+    """Authentication or authorization error."""
+    is_auth_error = True
+
+class LogicError(NexusError):
+    """Business logic violation."""
+    pass
+
+class CriticalError(NexusError):
+    """Critical system failure."""
+    pass
+
+
 # ── Circuit Breaker ──────────────────────────────────────────────────────────
 
 class CircuitOpenError(Exception):
@@ -80,6 +111,16 @@ class CircuitBreaker:
             self.failure_count += 1
             self.total_failures += 1
             self.last_failure_time = time.time()
+            
+            # Fix: If in half_open state, immediately return to open on failure
+            if self.state == "half_open":
+                self.state = "open"
+                logger.error(
+                    "circuit_half_open_failed",
+                    name=self.name,
+                    failures=self.failure_count,
+                )
+                raise
 
             if self.failure_count >= self.failure_threshold:
                 self.state = "open"
