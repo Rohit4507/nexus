@@ -17,6 +17,7 @@ import structlog
 from nexus.llm.router import LLMRouter
 from nexus.tools.registry import ToolRegistry
 from nexus.memory.audit_logger import AuditLogger
+from nexus.approvals.handler import ApprovalHandler
 
 logger = structlog.get_logger()
 
@@ -45,10 +46,12 @@ class ProcurementAgent:
         tool_registry: ToolRegistry,
         llm_router: LLMRouter,
         audit_logger: AuditLogger | None = None,
+        db_session=None,
     ):
         self.tools = tool_registry
         self.llm = llm_router
         self.audit = audit_logger or AuditLogger()
+        self.db = db_session
 
     async def execute(self, state: dict) -> dict[str, Any]:
         """Run the full procurement pipeline."""
@@ -90,7 +93,7 @@ class ProcurementAgent:
 
             # Step 4: Send approval if needed
             if approval_info["approval_required"]:
-                await self._send_approval_request(
+                approval_result = await self._send_approval_request(
                     workflow_id, extracted, approval_info, po_result
                 )
                 await self.audit.log_action(
@@ -98,8 +101,20 @@ class ProcurementAgent:
                     agent_name="procurement",
                     action="approval_sent",
                     status="awaiting_approval",
-                    output_data={"approver": approval_info["approver_role"]},
+                    output_data={
+                        "approver": approval_info["approver_role"],
+                        "approval_id": approval_result.get("approval_id"),
+                    },
                 )
+                # Return to indicate workflow is waiting for approval
+                return {
+                    "agent": "procurement",
+                    "status": "awaiting_approval",
+                    "approval_id": approval_result.get("approval_id"),
+                    "approver_role": approval_info["approver_role"],
+                    "po_id": po_result.get("po_id"),
+                    "message": "Workflow paused pending human approval",
+                }
 
             # Step 5: 3-way match
             match_result = await self._three_way_match(po_result.get("po_id", ""))
@@ -220,14 +235,34 @@ Only include fields that are mentioned or can be inferred.""",
 
     async def _send_approval_request(
         self, workflow_id: str, extracted: dict, approval: dict, po: dict
-    ) -> None:
-        """Send approval via Slack and Email."""
-        total = approval.get("total_amount", 0)
+    ) -> dict:
+        """Send approval via Slack and Email using ApprovalHandler."""
+        from nexus.approvals.handler import ApprovalHandler
 
-        # Slack approval
+        total = approval.get("total_amount", 0)
+        approver_role = approval.get("approver_role", "manager")
+
+        # Use ApprovalHandler for database tracking + notifications
+        if self.db:
+            handler = ApprovalHandler(self.db, self.tools, self.audit)
+            result = await handler.create_approval_request(
+                workflow_id=workflow_id,
+                workflow_type="procurement",
+                approver_role=approver_role,
+                amount=total,
+                requestor=extracted.get("department", "unknown"),
+                message=f"PO {po.get('po_id', 'N/A')}: {extracted.get('quantity', 0)}x {extracted.get('item', '')}",
+                payload=extracted,
+            )
+            return result
+
+        # Fallback: direct notification without DB tracking
+        total = approval.get("total_amount", 0)
+        result = {"slack": None, "email": None}
+
         if self.tools.has("slack_messenger"):
             slack = self.tools.get("slack_messenger")
-            await slack.call({
+            slack_result = await slack.call({
                 "action": "send_approval",
                 "workflow_id": workflow_id,
                 "workflow_type": "procurement",
@@ -236,11 +271,11 @@ Only include fields that are mentioned or can be inferred.""",
                 "requestor": extracted.get("department", "unknown"),
                 "channel": f"#approvals-{approval['approver_role']}",
             })
+            result["slack"] = slack_result
 
-        # Email approval
         if self.tools.has("email_connector"):
             email = self.tools.get("email_connector")
-            await email.call({
+            email_result = await email.call({
                 "action": "send_approval_email",
                 "to": f"{approval['approver_role']}@company.com",
                 "workflow_id": workflow_id,
@@ -248,6 +283,9 @@ Only include fields that are mentioned or can be inferred.""",
                 "message": f"PO {po.get('po_id', 'N/A')}: {extracted.get('item', '')}",
                 "amount": total,
             })
+            result["email"] = email_result
+
+        return result
 
     async def _three_way_match(self, po_id: str) -> dict:
         """Run 3-way match in SAP."""

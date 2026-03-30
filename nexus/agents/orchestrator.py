@@ -149,7 +149,7 @@ async def execute_node(state: dict) -> dict:
 
     try:
         if wf_type == "procurement":
-            agent = ProcurementAgent(tools, llm, audit)
+            agent = ProcurementAgent(tools, llm, audit, db_session=None)
             result = await agent.execute(state)
         elif wf_type == "onboarding":
             agent = OnboardingAgent(tools, llm, audit)
@@ -173,8 +173,8 @@ async def execute_node(state: dict) -> dict:
         await llm.close()
         await tools.close_all()
 
-        if result.get("status") == "awaiting_human":
-            state["status"] = "in_progress"
+        if result.get("status") in ("awaiting_human", "awaiting_approval"):
+            state["status"] = "awaiting_approval"
             state["human_override"] = True
         else:
             state["status"] = "completed"
