@@ -1,0 +1,466 @@
+# NEXUS Kubernetes Deployment Configuration
+# Deploy with: kubectl apply -f k8s/deployment.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nexus
+  labels:
+    app: nexus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-config
+  namespace: nexus
+data:
+  ENV: "production"
+  LOG_LEVEL: "INFO"
+  DB_HOST: "nexus-postgres"
+  DB_PORT: "5432"
+  DB_NAME: "nexus"
+  DB_USER: "nexus"
+  REDIS_URL: "redis://nexus-redis:6379"
+  OLLAMA_URL: "http://nexus-ollama:11434"
+  PAYMENT_ENABLED: "false"
+  CONTRACT_DOCUSIGN_POLL_INTERVAL_SECONDS: "15.0"
+  CONTRACT_DOCUSIGN_POLL_MAX_ATTEMPTS: "40"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nexus-secrets
+  namespace: nexus
+type: Opaque
+stringData:
+  DB_PASSWORD: "nexus_prod_secure_2026"  # Replace with external secret management
+  ANTHROPIC_API_KEY: ""  # Add when using Claude API
+  HF_TOKEN: ""  # Add for HuggingFace models
+  SAP_BASE_URL: "https://api.sap.com"
+  SALESFORCE_URL: "https://login.salesforce.com"
+  SLACK_BOT_TOKEN: ""  # Add your Slack bot token
+  SMTP_PASSWORD: ""
+  DOCUSIGN_API_KEY: ""
+  N8N_PASSWORD: "admin_secure_2026"
+  GRAFANA_PASSWORD: "grafana_secure_2026"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-api
+  namespace: nexus
+  labels:
+    app: nexus-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nexus-api
+  template:
+    metadata:
+      labels:
+        app: nexus-api
+    spec:
+      containers:
+        - name: nexus-api
+          image: nexus-api:latest  # Replace with your registry
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: nexus-config
+            - secretRef:
+                name: nexus-secrets
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: data-volume
+              mountPath: /app/data
+            - name: logs-volume
+              mountPath: /app/logs
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: nexus-data-pvc
+        - name: logs-volume
+          emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: nexus-api
+                topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-api
+  namespace: nexus
+spec:
+  selector:
+    app: nexus-api
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+      name: http
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-dashboard
+  namespace: nexus
+  labels:
+    app: nexus-dashboard
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nexus-dashboard
+  template:
+    metadata:
+      labels:
+        app: nexus-dashboard
+    spec:
+      containers:
+        - name: streamlit
+          image: nexus-dashboard:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8501
+              name: http
+          env:
+            - name: API_BASE_URL
+              value: "http://nexus-api:80"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8501
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-dashboard
+  namespace: nexus
+spec:
+  selector:
+    app: nexus-dashboard
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8501
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-ollama
+  namespace: nexus
+  labels:
+    app: nexus-ollama
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nexus-ollama
+  template:
+    metadata:
+      labels:
+        app: nexus-ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          ports:
+            - containerPort: 11434
+              name: http
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"  # Requires GPU node
+            limits:
+              cpu: "4000m"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: ollama-models
+              mountPath: /root/.ollama
+      volumes:
+        - name: ollama-models
+          persistentVolumeClaim:
+            claimName: nexus-ollama-pvc
+      nodeSelector:
+        nvidia.com/gpu: "true"  # Schedule on GPU nodes
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-ollama
+  namespace: nexus
+spec:
+  selector:
+    app: nexus-ollama
+  ports:
+    - protocol: TCP
+      port: 11434
+      targetPort: 11434
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nexus-postgres
+  namespace: nexus
+spec:
+  serviceName: nexus-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nexus-postgres
+  template:
+    metadata:
+      labels:
+        app: nexus-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          envFrom:
+            - configMapRef:
+                name: nexus-config
+            - secretRef:
+                name: nexus-secrets
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nexus-secrets
+                  key: DB_PASSWORD
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nexus"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nexus"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-postgres
+  namespace: nexus
+spec:
+  selector:
+    app: nexus-postgres
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-redis
+  namespace: nexus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nexus-redis
+  template:
+    metadata:
+      labels:
+        app: nexus-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+  volumes:
+    - name: redis-data
+      persistentVolumeClaim:
+        claimName: nexus-redis-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nexus-redis
+  namespace: nexus
+spec:
+  selector:
+    app: nexus-redis
+  ports:
+    - protocol: TCP
+      port: 6379
+      targetPort: 6379
+  clusterIP: None
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-data-pvc
+  namespace: nexus
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-ollama-pvc
+  namespace: nexus
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nexus-redis-pvc
+  namespace: nexus
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nexus-ingress
+  namespace: nexus
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: nexus-api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nexus-api
+                port:
+                  number: 80
+    - host: nexus.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nexus-dashboard
+                port:
+                  number: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nexus-api-hpa
+  namespace: nexus
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nexus-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
