@@ -73,10 +73,12 @@ def create_app() -> FastAPI:
     from nexus.api.routes import router as workflows_router
     from nexus.api.routes.approvals import router as approvals_router
     from nexus.api.routes.webhooks import router as webhooks_router
+    from nexus.api.routes.meetings import router as meetings_router
 
     app.include_router(workflows_router)
     app.include_router(approvals_router)
     app.include_router(webhooks_router)
+    app.include_router(meetings_router)
 
     # ── Prometheus Metrics ───────────────────────────────────
     Instrumentator().instrument(app).expose(app, endpoint="/metrics")

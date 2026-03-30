@@ -88,6 +88,19 @@ class Settings(BaseSettings):
     n8n_api_key: str = ""
     n8n_auth_token: str = ""
 
+    # ── Meeting Recordings ────────────────────────────────────
+    meeting_recording_storage: str = "local"  # local | s3
+    meeting_recording_local_dir: str = "data/meetings"
+    meeting_recording_s3_bucket: str = ""
+    meeting_recording_s3_prefix: str = "recordings"
+    meeting_auto_trigger_threshold: float = 0.8
+
+    # ── AWS S3 Configuration ───────────────────────────────────
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_region: str = "us-east-1"
+    aws_s3_endpoint_url: str = ""  # Optional: for S3-compatible services
+
     # ── Grafana ──────────────────────────────────────────────
     grafana_password: str = ""
 

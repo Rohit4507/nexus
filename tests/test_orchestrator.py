@@ -25,6 +25,7 @@ from nexus.agents.orchestrator import (
     build_orchestrator_graph,
     compile_orchestrator,
 )
+from nexus.agents.meeting import MeetingAgent
 
 
 # ── WorkflowState Tests ─────────────────────────────────────────────────────
@@ -59,6 +60,17 @@ def test_workflow_state_meeting_type():
 
     assert state["workflow_type"] == "meeting"
     assert state["status"] == "pending"
+
+
+def test_workflow_state_preserves_provided_workflow_id():
+    """WorkflowState should retain externally assigned workflow IDs."""
+    state = WorkflowState.create(
+        workflow_type="meeting",
+        payload={"title": "Planning"},
+        workflow_id="wf-explicit-123",
+    )
+
+    assert state["workflow_id"] == "wf-explicit-123"
 
 
 # ── Node Tests ──────────────────────────────────────────────────────────────
@@ -236,3 +248,19 @@ async def test_full_workflow_execution():
     assert result is not None
     assert result["workflow_id"] == initial_state["workflow_id"]
     assert result["workflow_type"] == "meeting"
+
+
+@pytest.mark.asyncio
+async def test_meeting_agent_transcript_priority():
+    """Transcript input should short-circuit audio transcription."""
+    agent = MeetingAgent()
+    agent._transcribe_audio = pytest.fail  # type: ignore[assignment]
+
+    result = await agent.process(
+        audio_path="missing.wav",
+        transcript_text="Short transcript for testing priority.",
+        meeting_metadata={"workflow_id": "wf-1", "title": "Priority Test"},
+    )
+
+    assert result["workflow_id"] == "wf-1"
+    assert "Short transcript" in result["transcript"]

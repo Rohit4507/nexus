@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy import text
 
 from nexus.database import get_db
@@ -170,6 +170,8 @@ async def n8n_webhook(
             workflow_type=workflow_type,
             payload=body.get("payload", body),
             created_by=body.get("created_by"),
+            workflow_id=workflow_id,
+            db_session=db,
         )
 
         # Update status
@@ -308,6 +310,7 @@ async def slack_webhook(
                 workflow_type=workflow_type,
                 payload=payload,
                 created_by=user,
+                workflow_id=workflow_id,
             )
             # Update status
             async with db() as session:
@@ -437,6 +440,8 @@ async def email_webhook(
             workflow_type=workflow_type,
             payload=payload,
             created_by=from_email,
+            workflow_id=workflow_id,
+            db_session=db,
         )
 
         return {

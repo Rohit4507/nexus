@@ -43,6 +43,8 @@ python-dotenv = "^1.0"
 structlog = "^24.0"
 # Metrics
 prometheus-fastapi-instrumentator = "^7.0"
+# AWS S3 for meeting recordings
+boto3 = "^1.35.0"
 # Supporting
 orjson = "^3.10"
 tenacity = "^9.0"

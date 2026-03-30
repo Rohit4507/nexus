@@ -23,6 +23,7 @@ from nexus.memory.audit_logger import AuditLogger
 from nexus.agents.execution.procurement import ProcurementAgent
 from nexus.agents.execution.onboarding import OnboardingAgent
 from nexus.agents.execution.contracts import ContractAgent
+from nexus.agents.meeting import MeetingAgent
 
 logger = structlog.get_logger()
 
@@ -41,11 +42,13 @@ class WorkflowState(dict):
         workflow_type: str,
         payload: dict[str, Any],
         created_by: str | None = None,
+        workflow_id: str | None = None,
+        db_session: Any | None = None,
     ) -> "WorkflowState":
         """Factory to create a new workflow state with defaults."""
         now = datetime.now(timezone.utc).isoformat()
         return WorkflowState(
-            workflow_id=str(uuid.uuid4()),
+            workflow_id=workflow_id or str(uuid.uuid4()),
             workflow_type=workflow_type,
             current_phase="initialized",
             status="pending",
@@ -59,6 +62,7 @@ class WorkflowState(dict):
             created_by=created_by,
             created_at=now,
             updated_at=now,
+            _db_session=db_session,
         )
 
 
@@ -149,7 +153,7 @@ async def execute_node(state: dict) -> dict:
 
     try:
         if wf_type == "procurement":
-            agent = ProcurementAgent(tools, llm, audit, db_session=None)
+            agent = ProcurementAgent(tools, llm, audit, db_session=state.get("_db_session"))
             result = await agent.execute(state)
         elif wf_type == "onboarding":
             agent = OnboardingAgent(tools, llm, audit)
@@ -158,7 +162,8 @@ async def execute_node(state: dict) -> dict:
             agent = ContractAgent(tools, llm, audit)
             result = await agent.execute(state)
         elif wf_type == "meeting":
-            result = {"status": "mocked", "msg": "meeting agent stub"}
+            agent = MeetingAgent(tools, llm, audit, db_session=state.get("_db_session"))
+            result = await agent.execute(state)
         else:
             raise ValueError(f"No execution logic for {wf_type}")
 
@@ -170,7 +175,10 @@ async def execute_node(state: dict) -> dict:
         })
         
         # Shutdown runtime clients properly
-        await llm.close()
+        if wf_type == "meeting" and 'agent' in locals() and hasattr(agent, "close"):
+            await agent.close()
+        else:
+            await llm.close()
         await tools.close_all()
 
         if result.get("status") in ("awaiting_human", "awaiting_approval"):
@@ -183,7 +191,10 @@ async def execute_node(state: dict) -> dict:
 
     except Exception as e:
         logger.error("execution_failed", error=str(e), workflow_type=wf_type)
-        await llm.close()
+        if wf_type == "meeting" and 'agent' in locals() and hasattr(agent, "close"):
+            await agent.close()
+        else:
+            await llm.close()
         await tools.close_all()
         state["error_log"].append({
             "phase": "execute",
@@ -327,6 +338,8 @@ async def run_workflow(
     workflow_type: str,
     payload: dict[str, Any],
     created_by: str | None = None,
+    workflow_id: str | None = None,
+    db_session: Any | None = None,
 ) -> dict:
     """Run a workflow through the full orchestrator pipeline.
 
@@ -343,6 +356,8 @@ async def run_workflow(
         workflow_type=workflow_type,
         payload=payload,
         created_by=created_by,
+        workflow_id=workflow_id,
+        db_session=db_session,
     )
 
     logger.info(

@@ -17,7 +17,7 @@ import structlog
 from nexus.llm.router import LLMRouter
 from nexus.tools.registry import ToolRegistry
 from nexus.memory.audit_logger import AuditLogger
-from nexus.approvals.handler import ApprovalHandler
+from approvals.handler import ApprovalHandler
 
 logger = structlog.get_logger()
 
@@ -237,7 +237,7 @@ Only include fields that are mentioned or can be inferred.""",
         self, workflow_id: str, extracted: dict, approval: dict, po: dict
     ) -> dict:
         """Send approval via Slack and Email using ApprovalHandler."""
-        from nexus.approvals.handler import ApprovalHandler
+        from approvals.handler import ApprovalHandler
 
         total = approval.get("total_amount", 0)
         approver_role = approval.get("approver_role", "manager")

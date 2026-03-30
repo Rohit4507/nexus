@@ -8,14 +8,20 @@ Uses: Whisper (via Ollama) for transcription, LLaMA 3 for action extraction,
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
 import structlog
+from sqlalchemy import text
 
+from nexus.config import get_settings
 from nexus.llm.router import LLMRouter
 from nexus.tools.registry import ToolRegistry
 from nexus.memory.audit_logger import AuditLogger
@@ -93,13 +99,39 @@ class MeetingAgent:
         tool_registry: ToolRegistry | None = None,
         llm_router: LLMRouter | None = None,
         audit_logger: AuditLogger | None = None,
+        db_session=None,
         ollama_url: str = "http://localhost:11434",
     ):
         self.tools = tool_registry
         self.llm = llm_router or LLMRouter()
         self.audit = audit_logger or AuditLogger()
+        self.db = db_session
+        self.settings = get_settings()
         self.ollama_url = ollama_url.rstrip("/")
         self.http = httpx.AsyncClient(timeout=120.0)
+
+    async def execute(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Adapter for orchestrator execute_node."""
+        payload = state.get("payload", {})
+        metadata = {
+            "workflow_id": state.get("workflow_id"),
+            "title": payload.get("title") or payload.get("meeting_title"),
+            "participants": payload.get("participants", []),
+            "recorded_at": payload.get("recorded_at"),
+            "channel": payload.get("channel", "#meetings"),
+            "created_by": state.get("created_by"),
+            "auto_trigger_workflows": payload.get("auto_trigger_workflows", False),
+            "trigger_confidence_threshold": payload.get(
+                "trigger_confidence_threshold",
+                self.settings.meeting_auto_trigger_threshold,
+            ),
+            "approve_high_impact_actions": payload.get("approve_high_impact_actions", False),
+        }
+        return await self.process(
+            audio_path=payload.get("audio_file_path"),
+            transcript_text=payload.get("transcript"),
+            meeting_metadata=metadata,
+        )
 
     async def process(
         self,
@@ -117,10 +149,13 @@ class MeetingAgent:
         Returns:
             Dict with transcript, summary, action_items, assignments
         """
+        meeting_metadata = meeting_metadata or {}
         workflow_id = meeting_metadata.get("workflow_id", str(uuid.uuid4()))
         logger.info("meeting_process_start", workflow_id=workflow_id)
 
         try:
+            recording_storage = await self._persist_recording(audio_path, meeting_metadata)
+
             # Step 1: Transcribe (if audio provided)
             if audio_path and not transcript_text:
                 transcript = await self._transcribe_audio(audio_path)
@@ -189,6 +224,19 @@ class MeetingAgent:
                 extracted,
             )
 
+            persistence_result = await self._persist_meeting_entities(
+                workflow_id=workflow_id,
+                transcript=transcript,
+                extracted=extracted,
+                meeting_metadata=meeting_meta,
+            )
+
+            downstream_workflows = await self._maybe_trigger_downstream_workflows(
+                workflow_id=workflow_id,
+                action_items=extracted.get("action_items", []),
+                meeting_metadata=meeting_meta,
+            )
+
             return {
                 "agent": "meeting",
                 "status": "completed",
@@ -201,8 +249,11 @@ class MeetingAgent:
                 "open_questions": extracted.get("open_questions", []),
                 "participants": extracted.get("participants", []),
                 "sentiment": extracted.get("sentiment", "unknown"),
+                "recording_storage": recording_storage,
+                "meeting_persistence": persistence_result,
                 "memory_stored": memory_result.get("stored", False),
                 "memory_metadata": memory_result if memory_result.get("stored") else None,
+                "downstream_workflows": downstream_workflows,
             }
 
         except Exception as e:
@@ -226,8 +277,6 @@ class MeetingAgent:
 
         This implementation supports multiple backends via config.
         """
-        import os
-
         # Check for OpenAI API key (highest quality)
         openai_key = os.environ.get("OPENAI_API_KEY")
         if openai_key:
@@ -559,6 +608,354 @@ Speaker 1: Alright, meeting adjourned. Thanks everyone!"""
                 "stored": False,
                 "error": str(e),
             }
+
+    async def _persist_recording(
+        self,
+        audio_path: str | None,
+        meeting_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist meeting recording with local-dev and S3 support using AWS configuration."""
+        if not audio_path:
+            return {"stored": False, "mode": "none", "reason": "no_audio_path"}
+
+        source = Path(audio_path)
+        if not source.exists():
+            return {"stored": False, "mode": "missing", "reason": f"file_not_found:{audio_path}"}
+
+        storage_mode = self.settings.meeting_recording_storage.lower()
+        object_key = (
+            f"{self.settings.meeting_recording_s3_prefix.strip('/')}/"
+            f"{meeting_metadata.get('workflow_id', source.stem)}{source.suffix}"
+        ).lstrip("/")
+
+        if storage_mode == "s3":
+            bucket = self.settings.meeting_recording_s3_bucket
+            if not bucket:
+                return {
+                    "stored": False,
+                    "mode": "s3",
+                    "reason": "missing_bucket_configuration",
+                    "object_key": object_key,
+                }
+            try:
+                import boto3
+                from botocore.exceptions import ClientError, NoCredentialsError
+
+                # Create S3 client with optional endpoint URL (for S3-compatible services)
+                s3_client_kwargs = {
+                    "aws_access_key_id": self.settings.aws_access_key_id,
+                    "aws_secret_access_key": self.settings.aws_secret_access_key,
+                    "region_name": self.settings.aws_region,
+                }
+                if self.settings.aws_s3_endpoint_url:
+                    s3_client_kwargs["endpoint_url"] = self.settings.aws_s3_endpoint_url
+
+                s3_client = boto3.client("s3", **s3_client_kwargs)
+
+                # Upload with proper metadata for retrieval
+                extra_args = {
+                    "Metadata": {
+                        "workflow_id": meeting_metadata.get("workflow_id", ""),
+                        "meeting_title": meeting_metadata.get("title", ""),
+                        "recorded_at": meeting_metadata.get("recorded_at", ""),
+                        "participants": json.dumps(meeting_metadata.get("participants", [])),
+                    },
+                    "ContentType": self._get_content_type(source.suffix),
+                }
+
+                s3_client.upload_file(str(source), bucket, object_key, ExtraArgs=extra_args)
+
+                # Generate presigned URL for immediate access (valid for 1 hour)
+                presigned_url = s3_client.generate_presigned_url(
+                    "get_object",
+                    {"Bucket": bucket, "Key": object_key},
+                    ExpiresIn=3600,
+                )
+
+                return {
+                    "stored": True,
+                    "mode": "s3",
+                    "bucket": bucket,
+                    "object_key": object_key,
+                    "presigned_url": presigned_url,
+                    "file_size": source.stat().st_size,
+                }
+
+            except ImportError:
+                return {
+                    "stored": False,
+                    "mode": "s3",
+                    "reason": "boto3_not_installed",
+                    "bucket": bucket,
+                    "object_key": object_key,
+                }
+            except (ClientError, NoCredentialsError) as e:
+                logger.error("s3_upload_failed", error=str(e), bucket=bucket, key=object_key)
+                return {
+                    "stored": False,
+                    "mode": "s3",
+                    "reason": f"aws_error:{str(e)}",
+                    "bucket": bucket,
+                    "object_key": object_key,
+                }
+            except Exception as e:
+                logger.warning("meeting_s3_upload_failed", error=str(e), path=str(source))
+                return {
+                    "stored": False,
+                    "mode": "s3",
+                    "reason": str(e),
+                    "bucket": bucket,
+                    "object_key": object_key,
+                }
+
+        # Local storage fallback
+        local_dir = Path(self.settings.meeting_recording_local_dir)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        destination = local_dir / f"{meeting_metadata.get('workflow_id', source.stem)}{source.suffix}"
+        if source.resolve() != destination.resolve():
+            shutil.copy2(source, destination)
+        return {
+            "stored": True,
+            "mode": "local",
+            "path": str(destination),
+            "file_size": destination.stat().st_size,
+        }
+
+    def _get_content_type(self, file_extension: str) -> str:
+        """Get appropriate content type for audio files."""
+        content_types = {
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".flac": "audio/flac",
+            ".aac": "audio/aac",
+        }
+        return content_types.get(file_extension.lower(), "application/octet-stream")
+
+    async def _persist_meeting_entities(
+        self,
+        workflow_id: str,
+        transcript: str,
+        extracted: dict[str, Any],
+        meeting_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist meeting summary and actions to PostgreSQL when a DB session is available."""
+        if self.db is None:
+            return {"stored": False, "reason": "db_session_unavailable"}
+
+        participants = extracted.get("participants") or meeting_metadata.get("participants") or []
+        recorded_at = meeting_metadata.get("recorded_at")
+        processed_at = datetime.now(timezone.utc)
+        meeting_id = str(uuid.uuid4())
+        action_rows = 0
+
+        await self.db.execute(
+            text(
+                """
+                INSERT INTO meetings (id, title, transcript, labelled_transcript, summary, participants, recorded_at, processed_at)
+                VALUES (:id, :title, :transcript, :labelled_transcript, :summary, CAST(:participants AS JSONB), :recorded_at, :processed_at)
+                """
+            ),
+            {
+                "id": meeting_id,
+                "title": meeting_metadata.get("title") or "Untitled Meeting",
+                "transcript": transcript,
+                "labelled_transcript": transcript,
+                "summary": extracted.get("summary"),
+                "participants": json.dumps(participants),
+                "recorded_at": recorded_at,
+                "processed_at": processed_at,
+            },
+        )
+
+        for item in extracted.get("action_items", []):
+            action_rows += 1
+            await self.db.execute(
+                text(
+                    """
+                    INSERT INTO meeting_actions (id, meeting_id, action_text, assignee, due_date, priority, status, workflow_id, created_at)
+                    VALUES (:id, :meeting_id, :action_text, :assignee, :due_date, :priority, :status, :workflow_id, :created_at)
+                    """
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "meeting_id": meeting_id,
+                    "action_text": item.get("task", ""),
+                    "assignee": item.get("assignee"),
+                    "due_date": item.get("due_date"),
+                    "priority": item.get("priority", "medium"),
+                    "status": "pending",
+                    "workflow_id": workflow_id,
+                    "created_at": processed_at,
+                },
+            )
+
+        await self.db.flush()
+        return {
+            "stored": True,
+            "meeting_id": meeting_id,
+            "action_rows": action_rows,
+        }
+
+    async def _maybe_trigger_downstream_workflows(
+        self,
+        workflow_id: str,
+        action_items: list[dict[str, Any]],
+        meeting_metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Create gated downstream workflows from meeting action items."""
+        if not meeting_metadata.get("auto_trigger_workflows"):
+            return []
+
+        threshold = float(
+            meeting_metadata.get(
+                "trigger_confidence_threshold",
+                self.settings.meeting_auto_trigger_threshold,
+            )
+        )
+        allow_high_impact = bool(meeting_metadata.get("approve_high_impact_actions"))
+        created_by = meeting_metadata.get("created_by")
+
+        downstream_results: list[dict[str, Any]] = []
+
+        for item in action_items:
+            task = str(item.get("task", "")).strip()
+            if not task:
+                continue
+
+            candidate = self._infer_workflow_from_action_item(item)
+            if candidate["workflow_type"] is None:
+                downstream_results.append({
+                    "task": task,
+                    "status": "skipped",
+                    "reason": "no_matching_workflow_type",
+                })
+                continue
+
+            if candidate["confidence"] < threshold:
+                downstream_results.append({
+                    "task": task,
+                    "status": "skipped",
+                    "workflow_type": candidate["workflow_type"],
+                    "confidence": candidate["confidence"],
+                    "reason": "confidence_below_threshold",
+                })
+                continue
+
+            if candidate["high_impact"] and not allow_high_impact:
+                downstream_results.append({
+                    "task": task,
+                    "status": "awaiting_approval",
+                    "workflow_type": candidate["workflow_type"],
+                    "confidence": candidate["confidence"],
+                    "reason": "high_impact_action_requires_approval",
+                })
+                continue
+
+            from nexus.agents.orchestrator import run_workflow
+
+            payload = {
+                "request_text": task,
+                "source": "meeting_action",
+                "source_workflow_id": workflow_id,
+                "assignee": item.get("assignee"),
+                "priority": item.get("priority", "medium"),
+                "due_date": item.get("due_date"),
+            }
+            child_workflow_id = await self._create_downstream_workflow_record(
+                workflow_type=candidate["workflow_type"],
+                payload=payload,
+                created_by=created_by,
+            )
+            child_result = await run_workflow(
+                workflow_type=candidate["workflow_type"],
+                payload=payload,
+                created_by=created_by,
+                workflow_id=child_workflow_id,
+                db_session=self.db,
+            )
+            if self.db is not None and child_workflow_id:
+                await self.db.execute(
+                    text(
+                        """
+                        UPDATE workflows
+                        SET status = :status, updated_at = :updated_at
+                        WHERE id = :workflow_id
+                        """
+                    ),
+                    {
+                        "status": child_result.get("status", "completed"),
+                        "updated_at": datetime.now(timezone.utc),
+                        "workflow_id": child_workflow_id,
+                    },
+                )
+                await self.db.flush()
+            downstream_results.append({
+                "task": task,
+                "status": "triggered",
+                "workflow_type": candidate["workflow_type"],
+                "confidence": candidate["confidence"],
+                "child_workflow_id": child_workflow_id or child_result.get("workflow_id"),
+                "child_status": child_result.get("status"),
+            })
+
+        return downstream_results
+
+    def _infer_workflow_from_action_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Heuristic workflow inference for action-item automation."""
+        text_blob = " ".join(
+            str(part)
+            for part in (item.get("task", ""), item.get("assignee", ""))
+            if part
+        ).lower()
+
+        procurement_terms = ("order", "buy", "purchase", "procure", "vendor", "invoice", "equipment", "laptop", "monitor")
+        onboarding_terms = ("onboard", "new hire", "access", "provision", "account", "slack", "email", "training")
+        contract_terms = ("contract", "agreement", "nda", "msa", "sow", "docusign", "legal", "renewal")
+
+        if any(term in text_blob for term in contract_terms):
+            return {"workflow_type": "contract", "confidence": 0.92, "high_impact": True}
+        if any(term in text_blob for term in onboarding_terms):
+            return {"workflow_type": "onboarding", "confidence": 0.86, "high_impact": False}
+        if any(term in text_blob for term in procurement_terms):
+            return {"workflow_type": "procurement", "confidence": 0.84, "high_impact": False}
+        return {"workflow_type": None, "confidence": 0.0, "high_impact": False}
+
+    async def _create_downstream_workflow_record(
+        self,
+        workflow_type: str,
+        payload: dict[str, Any],
+        created_by: str | None,
+    ) -> str | None:
+        """Create a workflow DB row for auto-triggered actions when a DB session exists."""
+        if self.db is None:
+            return None
+
+        workflow_id = str(uuid.uuid4())
+        payload_json = json.dumps(payload, sort_keys=True)
+        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+        now = datetime.now(timezone.utc)
+
+        await self.db.execute(
+            text(
+                """
+                INSERT INTO workflows (id, workflow_type, status, payload, payload_hash, created_by, created_at, updated_at)
+                VALUES (:id, :workflow_type, :status, :payload, :payload_hash, :created_by, :created_at, :updated_at)
+                """
+            ),
+            {
+                "id": workflow_id,
+                "workflow_type": workflow_type,
+                "status": "pending",
+                "payload": payload_json,
+                "payload_hash": payload_hash,
+                "created_by": created_by,
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        await self.db.flush()
+        return workflow_id
 
     async def close(self):
         """Cleanup HTTP clients."""

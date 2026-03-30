@@ -86,6 +86,8 @@ async def trigger_workflow(
             workflow_type=request.workflow_type,
             payload=request.payload,
             created_by=request.created_by,
+            workflow_id=workflow_id,
+            db_session=db,
         )
 
         # Update DB with final status
