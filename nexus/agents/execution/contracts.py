@@ -21,10 +21,21 @@ from nexus.llm.router import LLMRouter
 from nexus.tools.registry import ToolRegistry
 from nexus.memory.audit_logger import AuditLogger
 from nexus.memory.contract_type_aliases import canonical_contract_type
+from nexus.memory.vector import VectorMemoryManager
 
 logger = structlog.get_logger()
 
-LEGAL_REVIEW_AMOUNT_THRESHOLD = 100_000
+# ── Contract Configuration (User-Specified) ──────────────────────────────────
+
+LEGAL_REVIEW_AMOUNT_THRESHOLD = 10_000  # Contracts > $10K require legal review
+LEGAL_APPROVER_EMAIL = "rohitrajputsingh075@gmail.com"
+LEGAL_SLACK_CHANNEL = "nexus-legal"  # Slack channel for legal notifications
+
+# Supported contract types
+SUPPORTED_CONTRACT_TYPES = {"NDA", "MSA", "SOW", "Amendment"}
+
+# DocuSign mode: "staging" or "production"
+DOCUSIGN_MODE = "staging"
 # DocuSign REST envelope statuses that stop polling (lowercase match).
 _TERMINAL_ENVELOPE_STATUSES = frozenset({
     "completed",
@@ -174,9 +185,26 @@ class ContractAgent:
                 output_data=envelope_result,
             )
 
-            # Step 8: Notify stakeholders
-            await self._notify_stakeholders(workflow_id, extracted, envelope_result)
+            # Step 8: Track signature completion
             signature_status = await self._track_signature_status(envelope_result)
+
+            # Step 9: Store in ChromaDB (executed contracts)
+            if signature_status.get("terminal") and signature_status.get("final_status") == "completed":
+                memory_result = await self._store_in_chromadb(
+                    workflow_id, extracted, draft_text, signature_status
+                )
+                await self.audit.log_action(
+                    workflow_id=workflow_id,
+                    agent_name="contract",
+                    action="chromadb_storage",
+                    status="success",
+                    output_data=memory_result,
+                )
+            else:
+                memory_result = {"stored": False, "reason": "Contract not yet completed"}
+
+            # Step 10: Notify stakeholders
+            await self._notify_stakeholders(workflow_id, extracted, envelope_result, signature_status)
 
             return {
                 "agent": "contract",
@@ -185,6 +213,7 @@ class ContractAgent:
                 "risk_assessment": risk_assessment,
                 "envelope": envelope_result,
                 "signature_status": signature_status,
+                "memory_storage": memory_result,
                 "policy_context": {
                     "baseline_hits": len(baseline_policy_context),
                     "mitigation_hits": len(mitigation_policy_context),
@@ -195,7 +224,7 @@ class ContractAgent:
                         payload, extracted, "mitigation", risk_assessment
                     ),
                 },
-                "steps_completed": 8,
+                "steps_completed": 10,
             }
 
         except Exception as e:
@@ -459,7 +488,6 @@ Output JSON containing:
 
         reasons = risk.get("legal_trigger_reasons") or []
         reason_text = ", ".join(reasons) if reasons else "policy"
-        legal_email = get_settings().legal_notification_email
 
         if self.tools.has("slack_messenger"):
             slack = self.tools.get("slack_messenger")
@@ -468,33 +496,44 @@ Output JSON containing:
                 "workflow_id": workflow_id,
                 "workflow_type": "contract",
                 "message": (
-                    f"Legal review required for {terms.get('contract_type')} with {terms.get('party_b')} "
-                    f"(risk: {str(risk.get('risk_level', '')).upper()}). "
-                    f"*Triggers:* {reason_text}\n\n*Reasoning:* {risk.get('reasoning', '')}"
+                    f"⚖️ Legal Review Required\n\n"
+                    f"Type: {terms.get('contract_type')}\n"
+                    f"Counterparty: {terms.get('party_b')}\n"
+                    f"Value: ${terms.get('amount', 0):,.2f}\n"
+                    f"Risk Level: {str(risk.get('risk_level', 'unknown')).upper()}\n\n"
+                    f"*Triggers:* {reason_text}\n"
+                    f"*Reasoning:* {risk.get('reasoning', 'N/A')}\n\n"
+                    f"Workflow ID: `{workflow_id[:8]}...`"
                 ),
                 "amount": terms.get("amount", 0),
                 "requestor": "Contract AI Agent",
-                "channel": "#legal-review",
+                "channel": f"#{LEGAL_SLACK_CHANNEL}",
             })
 
         if self.tools.has("email_connector"):
             email = self.tools.get("email_connector")
             await email.call({
                 "action": "send_notification",
-                "to": legal_email,
-                "subject": f"[Legal review] {workflow_id} — {terms.get('contract_type', 'Contract')}",
+                "to": LEGAL_APPROVER_EMAIL,
+                "subject": f"⚖️ Legal Review: {terms.get('contract_type')} - {terms.get('party_b')} (${terms.get('amount', 0):,.2f})",
                 "message": (
-                    f"Workflow {workflow_id} requires legal review before signing.\n"
+                    f"A contract requires legal review before execution.\n\n"
+                    f"Workflow ID: {workflow_id}\n"
+                    f"Contract Type: {terms.get('contract_type')}\n"
                     f"Counterparty: {terms.get('party_b')}\n"
-                    f"Amount: {terms.get('amount')}\n"
-                    f"Triggers: {reason_text}\n\n"
-                    f"Reasoning: {risk.get('reasoning', '')}"
+                    f"Contract Value: ${terms.get('amount', 0):,.2f}\n"
+                    f"Risk Level: {str(risk.get('risk_level', 'unknown')).upper()}\n\n"
+                    f"Legal Review Triggers: {reason_text}\n\n"
+                    f"AI Analysis:\n{risk.get('reasoning', 'N/A')}\n\n"
+                    f"Please review and approve/reject via the NEXUS dashboard."
                 ),
             })
 
         return {
             "blocked": True,
             "status": "pending_legal_approval",
+            "legal_approver": LEGAL_APPROVER_EMAIL,
+            "slack_channel": LEGAL_SLACK_CHANNEL,
             "legal_trigger_reasons": reasons,
         }
 
@@ -568,27 +607,142 @@ Output JSON containing:
             "reason": "max_attempts_reached",
         }
 
+    async def _store_in_chromadb(
+        self,
+        workflow_id: str,
+        terms: dict,
+        draft_text: str,
+        signature_status: dict,
+    ) -> dict:
+        """Store executed contract in ChromaDB for future reference.
+
+        Metadata fields stored:
+        - jurisdiction
+        - renewal_dates
+        - counterparty
+        - contract_value
+        - expiry_date
+        - document_type
+        """
+        try:
+            memory = VectorMemoryManager()
+
+            # Calculate expiry date from effective/expiration dates
+            expiry_date = terms.get("expiration_date") or terms.get("end_date")
+            if not expiry_date and terms.get("effective_date"):
+                try:
+                    from datetime import timedelta
+                    effective = datetime.fromisoformat(str(terms.get("effective_date")).replace("Z", "+00:00"))
+                    expiry_date = (effective + timedelta(days=365)).strftime("%Y-%m-%d")
+                except Exception:
+                    expiry_date = None
+
+            # Build metadata with required fields
+            metadata = {
+                "type": "executed_contract",
+                "workflow_id": workflow_id,
+                "document_type": canonical_contract_type(terms.get("contract_type", "Unknown")),
+                "counterparty": terms.get("party_b", "Unknown"),
+                "contract_value": float(terms.get("amount", 0)),
+                "jurisdiction": terms.get("jurisdiction", "Unknown"),
+                "renewal_dates": terms.get("renewal_terms", terms.get("auto_renewal", "Not specified")),
+                "expiry_date": expiry_date or "TBD",
+                "effective_date": terms.get("effective_date", "TBD"),
+                "executed_at": datetime.now(timezone.utc).isoformat(),
+                "docusign_envelope_id": signature_status.get("envelope_id", ""),
+                "signing_status": signature_status.get("final_status", "unknown"),
+            }
+
+            # Store contract sections for retrieval
+            contract_sections = [
+                f"Contract Summary: {terms.get('contract_type')} between {terms.get('party_a', 'Company')} and {terms.get('party_b', 'Unknown')} - Value: ${terms.get('amount', 0):,.2f}",
+                f"Contract Draft: {draft_text[:4000]}",  # Truncate for storage limits
+                f"Risk Assessment: Level={terms.get('risk_level', 'unknown')}, Requires Legal={terms.get('requires_legal', False)}",
+            ]
+
+            section_metadatas = [
+                {**metadata, "section": "summary"},
+                {**metadata, "section": "full_draft"},
+                {**metadata, "section": "risk_assessment"},
+            ]
+
+            await memory.upsert_dynamic(
+                texts=contract_sections,
+                metadatas=section_metadatas,
+            )
+
+            await memory.close()
+
+            logger.info(
+                "contract_stored_chromadb",
+                workflow_id=workflow_id,
+                contract_type=terms.get("contract_type"),
+                counterparty=terms.get("party_b"),
+            )
+
+            return {
+                "stored": True,
+                "contract_type": terms.get("contract_type"),
+                "counterparty": terms.get("party_b"),
+                "metadata_fields": list(metadata.keys()),
+            }
+
+        except Exception as e:
+            logger.warning("contract_chromadb_storage_failed", error=str(e))
+            return {"stored": False, "error": str(e)}
+
     async def _notify_stakeholders(
-        self, workflow_id: str, terms: dict, envelope: dict
+        self, workflow_id: str, terms: dict, envelope: dict, signature_status: dict | None = None
     ) -> None:
-        """Notify team that signatures are out."""
+        """Notify team about contract status."""
+        status = signature_status or {}
+        final_status = status.get("final_status", "unknown")
+
         if self.tools.has("slack_messenger"):
             slack = self.tools.get("slack_messenger")
+
+            if final_status == "completed":
+                emoji = "✅"
+                status_text = "Fully Executed"
+            elif final_status == "declined":
+                emoji = "❌"
+                status_text = "Declined"
+            elif final_status == "voided":
+                emoji = "⚠️"
+                status_text = "Voided"
+            else:
+                emoji = "✍️"
+                status_text = "Awaiting Signatures"
+
             await slack.call({
                 "action": "send_message",
-                "channel": "#contracts",
-                "text": f"✍️ Contract draft sent via DocuSign to {terms.get('party_b')}.\nEnvelope ID: `{envelope.get('envelope_id')}`",
+                "channel": "#nexus-contracts",
+                "text": (
+                    f"{emoji} Contract Update — {status_text}\n\n"
+                    f"Type: {terms.get('contract_type')}\n"
+                    f"Counterparty: {terms.get('party_b')}\n"
+                    f"Value: ${terms.get('amount', 0):,.2f}\n"
+                    f"Envelope ID: `{envelope.get('envelope_id', 'N/A')}`\n"
+                    f"Workflow: `{workflow_id[:8]}...`"
+                ),
             })
 
         if self.tools.has("email_connector"):
             email = self.tools.get("email_connector")
-            legal_email = get_settings().legal_notification_email
+
+            # Notify legal approver
             await email.call({
                 "action": "send_notification",
-                "to": legal_email,
-                "subject": f"Contract sent for signature: {terms.get('contract_type', 'Agreement')}",
+                "to": LEGAL_APPROVER_EMAIL,
+                "subject": f"Contract Status: {terms.get('contract_type')} - {final_status.upper()}",
                 "message": (
-                    f"Workflow {workflow_id} has dispatched a DocuSign envelope "
-                    f"for {terms.get('party_b')} (envelope {envelope.get('envelope_id')})."
+                    f"Contract Workflow Update\n\n"
+                    f"Workflow ID: {workflow_id}\n"
+                    f"Contract Type: {terms.get('contract_type')}\n"
+                    f"Counterparty: {terms.get('party_b')}\n"
+                    f"Envelope ID: {envelope.get('envelope_id', 'N/A')}\n"
+                    f"Status: {final_status}\n\n"
+                    f"The contract has been {'fully executed and stored in the system' if final_status == 'completed' else 'updated'}. "
+                    "Check the NEXUS dashboard for details."
                 ),
             })

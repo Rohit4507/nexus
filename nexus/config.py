@@ -82,8 +82,11 @@ class Settings(BaseSettings):
     contract_docusign_poll_max_attempts: int = 40
 
     # ── n8n ──────────────────────────────────────────────────
+    n8n_url: str = "http://localhost:5678"
     n8n_user: str = "admin"
     n8n_password: str = ""
+    n8n_api_key: str = ""
+    n8n_auth_token: str = ""
 
     # ── Grafana ──────────────────────────────────────────────
     grafana_password: str = ""
