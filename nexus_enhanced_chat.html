@@ -1,0 +1,665 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEXUS AI Assistant - Enterprise Workflow Automation</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        
+        .sidebar {
+            width: 320px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-right: 1px solid rgba(255, 255, 255, 0.1);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .sidebar-header {
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-align: center;
+        }
+        
+        .sidebar-content {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chat-container {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            margin: 20px;
+            border-radius: 15px;
+            overflow: hidden;
+        }
+        
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 15px 15px 0 0;
+        }
+        
+        .chat-input-container {
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 0 0 15px 15px;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .chat-input {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #667eea;
+            border-radius: 25px;
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+        
+        .chat-input:focus {
+            border-color: #764ba2;
+        }
+        
+        .send-button {
+            padding: 15px 25px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: transform 0.2s;
+        }
+        
+        .send-button:hover {
+            transform: scale(1.05);
+        }
+        
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: flex-start;
+            animation: fadeIn 0.3s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message.user {
+            justify-content: flex-end;
+        }
+        
+        .message.assistant {
+            justify-content: flex-start;
+        }
+        
+        .message-bubble {
+            max-width: 75%;
+            padding: 15px 20px;
+            border-radius: 18px;
+            word-wrap: break-word;
+            position: relative;
+            line-height: 1.4;
+        }
+        
+        .message.user .message-bubble {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+        
+        .message.assistant .message-bubble {
+            background: #f1f3f4;
+            color: #333;
+            border-bottom-left-radius: 5px;
+        }
+        
+        .message-time {
+            font-size: 11px;
+            opacity: 0.7;
+            margin-top: 5px;
+        }
+        
+        .typing-indicator {
+            display: none;
+            padding: 15px;
+            font-style: italic;
+            color: #999;
+            background: rgba(241, 243, 244, 0.9);
+            border-radius: 15px;
+            margin: 10px;
+        }
+        
+        .typing-indicator.active {
+            display: block;
+        }
+        
+        .info-card {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .info-title {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 8px;
+        }
+        
+        .info-content {
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        
+        .status-online { background: #27ae60; }
+        .status-offline { background: #e74c3c; }
+        
+        .quick-actions {
+            padding: 15px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        .quick-action-button {
+            display: inline-block;
+            margin: 5px;
+            padding: 8px 15px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        
+        .quick-action-button:hover {
+            background: #667eea;
+            color: white;
+            transform: scale(1.05);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>🤖 NEXUS AI</h2>
+                <p>Enterprise Assistant</p>
+            </div>
+            <div class="sidebar-content">
+                <div class="info-card">
+                    <div class="info-title">🔗 System Status</div>
+                    <div class="info-content">
+                        <span class="status-indicator status-online" id="api-status"></span>
+                        NEXUS API
+                        <br>
+                        <span class="status-indicator status-online" id="ollama-status"></span>
+                        Ollama LLM
+                    </div>
+                </div>
+                
+                <div class="info-card">
+                    <div class="info-title">📅 Today's Schedule</div>
+                    <div class="info-content" id="schedule">
+                        <small>No meetings scheduled</small>
+                    </div>
+                </div>
+                
+                <div class="info-card">
+                    <div class="info-title">⏰ Active Reminders</div>
+                    <div class="info-content" id="reminders">
+                        <small>No reminders set</small>
+                    </div>
+                </div>
+                
+                <div class="info-card">
+                    <div class="info-title">📋 Tasks</div>
+                    <div class="info-content" id="tasks">
+                        <small>No tasks created</small>
+                    </div>
+                </div>
+                
+                <div class="quick-actions">
+                    <div class="info-title">⚡ Quick Actions</div>
+                    <div class="quick-action-button" onclick="sendQuickMessage('schedule meeting 9am team sync')">
+                        📅 Schedule Meeting
+                    </div>
+                    <div class="quick-action-button" onclick="sendQuickMessage('create reminder for 2pm deadline')">
+                        ⏰ Set Reminder
+                    </div>
+                    <div class="quick-action-button" onclick="sendQuickMessage('show my tasks')">
+                        📋 Show Tasks
+                    </div>
+                    <div class="quick-action-button" onclick="sendQuickMessage('process meeting transcript')">
+                        📤 Process Meeting
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="chat-container">
+                <div class="chat-messages" id="chatMessages">
+                    <div class="message assistant">
+                        <div class="message-bubble">
+                            👋 Hello! I'm your NEXUS AI Assistant, designed to help you with enterprise workflow automation. I can help you with a wide range of tasks including meeting scheduling, reminder management, task tracking, and intelligent document processing.
+                            
+                            I'm here to make your workday more productive by handling the administrative overhead so you can focus on what matters most. Think of me as your personal productivity assistant with access to powerful enterprise automation capabilities.
+                            
+                            How can I help you today? You can ask me anything from scheduling meetings to analyzing documents, or just have a conversation about your workday!
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="typing-indicator" id="typingIndicator">
+                    🤖 NEXUS AI is thinking...
+                </div>
+                
+                <div class="chat-input-container">
+                    <input 
+                        type="text" 
+                        class="chat-input" 
+                        id="chatInput" 
+                        placeholder="Type your message here... (e.g., 'help me organize my day', 'what's on my schedule?', 'let's plan the week ahead')"
+                        onkeypress="handleKeyPress(event)"
+                    >
+                    <button class="send-button" onclick="sendMessage()">
+                        Send
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let conversationHistory = [];
+        let meetings = [];
+        let reminders = [];
+        let tasks = [];
+        let userProfile = {
+            name: 'User',
+            preferences: {
+                meetingDuration: 60,
+                reminderAdvance: 15,
+                workHours: '9am-6pm'
+            }
+        };
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            checkSystemStatus();
+            setInterval(checkSystemStatus, 30000);
+            document.getElementById('chatInput').focus();
+        });
+        
+        function checkSystemStatus() {
+            fetch('http://localhost:8000/health')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('api-status').className = 'status-indicator status-online';
+                })
+                .catch(() => {
+                    document.getElementById('api-status').className = 'status-indicator status-offline';
+                });
+            
+            fetch('http://localhost:11434/api/tags')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('ollama-status').className = 'status-indicator status-online';
+                })
+                .catch(() => {
+                    document.getElementById('ollama-status').className = 'status-indicator status-offline';
+                });
+        }
+        
+        function handleKeyPress(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                sendMessage();
+            }
+        }
+        
+        function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            addMessage(message, 'user');
+            input.value = '';
+            showTypingIndicator();
+            
+            setTimeout(() => {
+                hideTypingIndicator();
+                const response = generateChatGPTResponse(message);
+                addMessage(response, 'assistant');
+                updateSidebar();
+            }, 1000 + Math.random() * 2000);
+        }
+        
+        function sendQuickMessage(message) {
+            document.getElementById('chatInput').value = message;
+            sendMessage();
+        }
+        
+        function addMessage(content, sender) {
+            const messagesContainer = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}`;
+            
+            const bubbleDiv = document.createElement('div');
+            bubbleDiv.className = 'message-bubble';
+            bubbleDiv.innerHTML = content;
+            
+            const timeDiv = document.createElement('div');
+            timeDiv.className = 'message-time';
+            timeDiv.textContent = new Date().toLocaleTimeString();
+            
+            messageDiv.appendChild(bubbleDiv);
+            messageDiv.appendChild(timeDiv);
+            messagesContainer.appendChild(messageDiv);
+            
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+        
+        function showTypingIndicator() {
+            document.getElementById('typingIndicator').classList.add('active');
+        }
+        
+        function hideTypingIndicator() {
+            document.getElementById('typingIndicator').classList.remove('active');
+        }
+        
+        function generateChatGPTResponse(message) {
+            const lowerMessage = message.toLowerCase();
+            
+            // Greeting and general conversation
+            if (lowerMessage.includes('hello') || lowerMessage.includes('hi') || lowerMessage.includes('hey')) {
+                return `Good ${getTimeOfDay()}! I'm here to help you make the most of your workday. 
+                
+I can assist you with scheduling meetings, setting reminders, managing tasks, processing documents, and automating workflows. I notice you don't have any meetings scheduled today - would you like me to help you organize your day?
+                
+What's on your mind right now? Are you looking to plan your day, catch up on tasks, or perhaps schedule some time for deep work?`;
+            }
+            
+            // Help and capabilities
+            if (lowerMessage.includes('help') || lowerMessage.includes('what can you do')) {
+                return `I'm your NEXUS AI Assistant with comprehensive capabilities for enterprise productivity:
+                
+📅 **Meeting Management**: I can schedule meetings, send calendar invites, set up recurring meetings, and manage attendee availability
+⏰ **Smart Reminders**: Set reminders for deadlines, meetings, or important events with customizable timing
+📋 **Task Management**: Create, organize, prioritize, and track tasks with deadlines and progress
+📤 **Document Processing**: Analyze meeting transcripts, extract action items, generate summaries
+🤖 **Workflow Automation**: Trigger downstream workflows for procurement, onboarding, contracts, and more
+📊 **Intelligence**: Provide insights on productivity, meeting patterns, and workload distribution
+                
+I can understand natural language commands like "schedule a team meeting at 2 PM" or "remind me about the deadline tomorrow." I also learn from our conversations to provide more personalized assistance over time.
+
+What would you like to work on together?`;
+            }
+            
+            // Meeting scheduling with ChatGPT-like detail
+            if (lowerMessage.includes('meeting') || lowerMessage.includes('schedule') || lowerMessage.includes('arrange')) {
+                const time = extractTime(lowerMessage);
+                const attendees = extractAttendees(message);
+                const meeting = {
+                    id: Date.now(),
+                    title: extractMeetingTitle(message) || 'Team Meeting',
+                    time: time,
+                    date: new Date().toLocaleDateString(),
+                    attendees: attendees
+                };
+                meetings.push(meeting);
+                
+                return `I've scheduled your meeting for ${time} today. 
+                
+Here are the details I've set up:
+📅 **Meeting**: ${meeting.title}
+⏰ **Time**: ${time}
+📅 **Date**: ${new Date().toLocaleDateString()}
+👥 **Attendees**: ${attendees.join(', ') || 'To be determined'}
+
+I'll send calendar invitations to all participants and set a reminder for 15 minutes before the meeting. 
+
+Would you like me to:
+• Add an agenda for this meeting?
+• Set up a recurring weekly session?
+• Book a meeting room or video conference link?
+• Send a preparatory email to attendees?
+
+I can also help you prepare by gathering relevant documents or previous meeting notes from similar topics. Just let me know how else I can assist with this meeting!`;
+            }
+            
+            // Task management with helpful suggestions
+            if (lowerMessage.includes('task') || lowerMessage.includes('create') || lowerMessage.includes('add')) {
+                const taskText = extractTaskText(message);
+                const priority = extractPriority(message);
+                const deadline = extractDeadline(message);
+                
+                const task = {
+                    id: Date.now(),
+                    text: taskText,
+                    priority: priority || 'medium',
+                    deadline: deadline,
+                    status: 'pending',
+                    created: new Date().toLocaleString()
+                };
+                tasks.push(task);
+                
+                return `I've created your task: "${taskText}"
+                
+Here's how I've organized it:
+📋 **Task**: ${taskText}
+🎯 **Priority**: ${priority || 'medium'}
+⏰ **Deadline**: ${deadline || 'Not set'}
+📊 **Status**: Pending and ready for work
+
+To help you succeed with this task, I can:
+• Set up reminders for key milestones
+• Break it down into smaller subtasks
+• Find relevant resources or documents
+• Schedule dedicated work time in your calendar
+• Set up follow-up meetings if needed
+
+Would you like me to break this down into smaller, manageable steps or set up a timeline for completion?`;
+            }
+            
+            // Productivity and organization
+            if (lowerMessage.includes('organize') || lowerMessage.includes('plan') || lowerMessage.includes('productivity')) {
+                return `I'd be happy to help you get organized! Let me take a look at your current commitments and suggest an optimal structure for your day/week.
+
+Based on your current workload, here's what I recommend:
+
+📅 **Time Blocking**: Schedule dedicated blocks for deep work vs. meetings
+🎯 **Priority Management**: Tackle high-impact items during your peak energy hours
+📋 **Task Batching**: Group similar activities together for efficiency
+⏰ **Buffer Time**: Build in transition time between activities
+
+I can help you implement any of these strategies right now. Would you like me to:
+• Review your current tasks and suggest prioritization?
+• Set up a productivity-focused daily schedule?
+• Create time blocks for different types of work?
+• Analyze your meeting patterns for optimization?
+
+What's your biggest productivity challenge right now? Understanding your specific pain points will help me provide more targeted assistance.`;
+            }
+            
+            // Daily planning and review
+            if (lowerMessage.includes('day') || lowerMessage.includes('today') || lowerMessage.includes('schedule')) {
+                return `Let me help you plan your day for maximum productivity!
+
+📅 **Today's Overview**:
+${generateDayOverview()}
+
+🎯 **Strategic Recommendations**:
+• **Morning Block**: Use your peak energy for important tasks
+• **Meeting Clustering**: Group meetings together to minimize context switching
+• **Focus Time**: Schedule 2-3 hour blocks for deep work
+• **Buffer Zones**: Build in 15-minute buffers between major activities
+
+I can help you implement this structure right now. Would you like me to:
+• Create a detailed hourly schedule?
+• Set up focus time blocks for specific projects?
+• Optimize your meeting times?
+• Set up productivity reminders throughout the day?
+
+What's your main priority for today, and what obstacles do you anticipate?`;
+            }
+            
+            // Default helpful response
+            return `I understand you're interested in ${message}. 
+
+I'm here to help with enterprise workflow automation and productivity enhancement. I can assist with meeting scheduling, task management, document processing, reminder setting, and much more.
+
+Could you tell me more about what you're trying to accomplish? For example:
+• Are you planning your day or week?
+• Do you need help with specific tasks or projects?
+• Are you looking to optimize your meeting schedule?
+• Do you want to process meeting transcripts or documents?
+
+The more context you provide, the better I can assist you with personalized recommendations and automated solutions!`;
+        }
+        
+        function getTimeOfDay() {
+            const hour = new Date().getHours();
+            if (hour < 12) return 'morning';
+            if (hour < 17) return 'afternoon';
+            return 'evening';
+        }
+        
+        function extractTime(message) {
+            const timeRegex = /(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)/i;
+            const match = message.match(timeRegex);
+            
+            if (match) {
+                let hour = parseInt(match[1]);
+                const period = match[2].toLowerCase();
+                
+                if (period.includes('pm') && hour !== 12) hour += 12;
+                if (period.includes('am') && hour === 12) hour = 0;
+                
+                return `${hour.toString().padStart(2, '0')}:00`;
+            }
+            
+            return '9:00 AM';
+        }
+        
+        function extractAttendees(message) {
+            const attendeeRegex = /(?:with|for)\s+([a-zA-Z\s,?]+)/i;
+            const match = message.match(attendeeRegex);
+            return match ? match[1].split(',').map(name => name.trim()).filter(name => name) : [];
+        }
+        
+        function extractMeetingTitle(message) {
+            const titleRegex = /(?:meeting|meeting|schedule)\s+(?:for\s+)?(.+?)(?:\s+(?:with|at|for))/i;
+            const match = message.match(titleRegex);
+            return match ? match[1].trim() : null;
+        }
+        
+        function extractTaskText(message) {
+            const taskRegex = /(?:create|add)\s+task\s+(?:for\s+)?(.+)/i;
+            const match = message.match(taskRegex);
+            return match ? match[1].trim() : 'New task';
+        }
+        
+        function extractPriority(message) {
+            if (message.includes('urgent') || message.includes('high')) return 'high';
+            if (message.includes('low')) return 'low';
+            return 'medium';
+        }
+        
+        function extractDeadline(message) {
+            const deadlineRegex = /(?:by|before|due)\s+(.+)/i;
+            const match = message.match(deadlineRegex);
+            return match ? match[1].trim() : null;
+        }
+        
+        function generateDayOverview() {
+            const today = new Date();
+            const meetingsToday = meetings.filter(m => 
+                new Date(m.date).toDateString() === today.toDateString()
+            );
+            const tasksToday = tasks.filter(t => 
+                new Date(t.deadline || t.created).toDateString() === today.toDateString()
+            );
+            
+            let overview = `📅 **Meetings**: ${meetingsToday.length} scheduled\n`;
+            meetingsToday.forEach(m => {
+                overview += `   • ${m.time} - ${m.title}\n`;
+            });
+            
+            overview += `\n📋 **Tasks**: ${tasksToday.length} pending\n`;
+            tasksToday.forEach(t => {
+                overview += `   • ${t.text} (${t.priority})\n`;
+            });
+            
+            if (meetingsToday.length === 0 && tasksToday.length === 0) {
+                overview = '   🎯 **Clear day** - Focus on deep work or strategic planning\n';
+            }
+            
+            return overview;
+        }
+        
+        function updateSidebar() {
+            const scheduleDiv = document.getElementById('schedule');
+            if (meetings.length > 0) {
+                scheduleDiv.innerHTML = meetings.map(m => 
+                    `<small>📅 ${m.time} - ${m.title}</small>`
+                ).join('<br>');
+            }
+            
+            const remindersDiv = document.getElementById('reminders');
+            if (reminders.length > 0) {
+                remindersDiv.innerHTML = reminders.map(r => 
+                    `<small>⏰ ${r.time} - ${r.text}</small>`
+                ).join('<br>');
+            }
+            
+            const tasksDiv = document.getElementById('tasks');
+            if (tasks.length > 0) {
+                tasksDiv.innerHTML = tasks.map(t => 
+                    `<small>📋 ${t.text} (${t.status})</small>`
+                ).join('<br>');
+            }
+        }
+    </script>
+</body>
+</html>
+    
